@@ -3,8 +3,42 @@
 // - Explorar 3D: empieza en el Índice, clic despliega, clic otra vez repliega, "Atrás" deshace
 // - Árbol: modo plano tipo explorador de archivos, mismo despliegue / repliegue / atrás
 // Colores del tema de Obsidian + lluvia Matrix. Las notas se abren en una pestaña nueva.
-import * as obsidian from 'obsidian';
-import { Plugin, ItemView, PluginSettingTab, Setting, debounce } from 'obsidian';
+import { App, ItemView, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, debounce, getLanguage } from 'obsidian';
+
+interface Settings {
+  view: string;
+  mode: string;
+  rotateSpeed: number;
+  pulseSpeed: number;
+  nodeScale: number;
+  labels: string;
+  pulses: boolean;
+  background: string;
+  palette: string;
+  scanlines: boolean;
+  glow: boolean;
+  followActive: boolean;
+  openOnClick: boolean;
+  hiddenLayers: string[];
+}
+type BoolKey = 'pulses' | 'scanlines' | 'glow' | 'followActive' | 'openOnClick';
+interface Proj { x: number; y: number; s: number; depth: number }
+interface GNode {
+  id: string; path: string; file: TFile; folder: string; deg: number; nb: GNode[];
+  x: number; y: number; z: number; tx: number; ty: number; tz: number;
+  appear: number; vanish: boolean; p: Proj; hitR: number; hitW: number; depthT: number;
+}
+interface GLink { s: GNode; t: GNode }
+interface Cam { yaw: number; pitch: number; dist: number; tx: number; ty: number; tz: number }
+type Goal = Partial<Cam>;
+interface Pulse { l?: GLink; child?: GNode; k: number; rev?: boolean }
+interface Drop { x: number; y: number; v: number; chars: string[] }
+type RGB = [number, number, number];
+interface Colors {
+  bg: string; fg: string; muted: string; accent: string; font: string; mono: string;
+  bgRgb: RGB; fgRgb: RGB; mutedRgb: RGB; accentRgb: RGB; dark: boolean;
+}
+interface HistoryEntry { node: GNode; added: GNode[] }
 
 const VIEW_TYPE = 'neural-graph-3d-view';
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
@@ -13,7 +47,7 @@ const SPREAD = 26;
 const INDENT = 36;   // árbol: sangría por nivel
 const ROW = 28;      // árbol: alto de fila
 
-const DEFAULTS = {
+const DEFAULTS: Settings = {
   view: 'layers',          // layers | core
   mode: 'full',            // full | explore | tree
   rotateSpeed: 3,
@@ -31,8 +65,7 @@ const DEFAULTS = {
 };
 
 // ---------- i18n: English by default, Spanish when Obsidian is in Spanish ----------
-const STRINGS = {
-  en: {
+const EN = {
     title: 'Neural graph 3D', open: 'Open neural graph 3D', root: 'Root',
     search: '> search note…', full: 'Full map', explore: 'Explore 3D', tree: 'Tree',
     viewLayers: 'View: layers', viewCore: 'View: core',
@@ -42,9 +75,9 @@ const STRINGS = {
     hintTree: 'click: open/close branch · double-click: open note · drag: move · wheel: zoom · ⌫: back',
     hintExplore: 'click: expand / collapse · double-click: open note · drag: rotate · ⌫: back',
     hintFull: 'drag: rotate · wheel: zoom · click: focus · double-click: open note · /: search',
-    statsExplore: (a, b) => `> ${a}/${b} nodes discovered`,
-    statsFull: (n, l, k) => `> ${n} nodes // ${l} synapses // ${k} layers`,
-    layer: 'layer: ', conns: (n) => `${n} connections`, words: (w, n) => `${w} words · ${n} connections`, noSummary: 'No summary.',
+    statsExplore: (a: number, b: number) => `> ${a}/${b} nodes discovered`,
+    statsFull: (n: number, l: number, k: number) => `> ${n} nodes // ${l} synapses // ${k} layers`,
+    layer: 'layer: ', conns: (n: number) => `${n} connections`, words: (w: string, n: number) => `${w} words · ${n} connections`, noSummary: 'No summary.',
     sMode: 'Initial mode', sView: '3D view', sLayers: 'Layers (one per folder)', sCore: 'Core (all together)',
     hAppearance: 'Appearance', sColor: 'Color', sColorDesc: 'Your Obsidian theme colors, or a green or orange terminal style.',
     obsidianTheme: 'Obsidian theme', green: 'Green', orange: 'Orange',
@@ -56,8 +89,9 @@ const STRINGS = {
     follow: 'Follow the open note', followDesc: 'Highlights the note you are editing and moves the camera to it.',
     nodeSize: 'Node size', labels: 'Labels (3D views)', lAuto: 'Appear when zooming in', lAll: 'All', lNone: 'Only on hover',
     showLayers: 'Show all layers', showLayersDesc: 'Shows again the folders hidden from the legend.', showAll: 'Show all',
-  },
-  es: {
+};
+type Strings = typeof EN;
+const ES: Strings = {
     title: 'Red neuronal 3D', open: 'Abrir red neuronal 3D', root: 'Raíz',
     search: '> buscar nota…', full: 'Mapa completo', explore: 'Explorar 3D', tree: 'Árbol',
     viewLayers: 'Vista: capas', viewCore: 'Vista: núcleo',
@@ -67,9 +101,9 @@ const STRINGS = {
     hintTree: 'clic: abrir/cerrar rama · doble clic: abrir nota · arrastrar: mover · rueda: zoom · ⌫: atrás',
     hintExplore: 'clic: desplegar / replegar · doble clic: abrir nota · arrastrar: girar · ⌫: atrás',
     hintFull: 'arrastrar: girar · rueda: zoom · clic: ir · doble clic: abrir nota · /: buscar',
-    statsExplore: (a, b) => `> ${a}/${b} nodos descubiertos`,
-    statsFull: (n, l, k) => `> ${n} nodos // ${l} sinapsis // ${k} capas`,
-    layer: 'capa: ', conns: (n) => `${n} conexiones`, words: (w, n) => `${w} palabras · ${n} conexiones`, noSummary: 'Sin resumen.',
+    statsExplore: (a: number, b: number) => `> ${a}/${b} nodos descubiertos`,
+    statsFull: (n: number, l: number, k: number) => `> ${n} nodos // ${l} sinapsis // ${k} capas`,
+    layer: 'capa: ', conns: (n: number) => `${n} conexiones`, words: (w: string, n: number) => `${w} palabras · ${n} conexiones`, noSummary: 'Sin resumen.',
     sMode: 'Modo inicial', sView: 'Vista 3D', sLayers: 'Capas (una por carpeta)', sCore: 'Núcleo (todas juntas)',
     hAppearance: 'Apariencia', sColor: 'Color', sColorDesc: 'Colores del tema de Obsidian, o estilo terminal verde o naranja.',
     obsidianTheme: 'Tema de Obsidian', green: 'Verde', orange: 'Naranja',
@@ -81,39 +115,64 @@ const STRINGS = {
     follow: 'Seguir la nota abierta', followDesc: 'Marca la nota que estás editando y mueve la cámara hacia ella.',
     nodeSize: 'Tamaño de nodos', labels: 'Etiquetas (vistas 3D)', lAuto: 'Aparecen al acercarse', lAll: 'Todas', lNone: 'Solo al pasar el mouse',
     showLayers: 'Mostrar todas las capas', showLayersDesc: 'Vuelve a mostrar las carpetas ocultas desde la leyenda.', showAll: 'Mostrar todas',
-  },
 };
-const detectLang = () => {
+const detectLang = (): 'en' | 'es' => {
   let lang = 'en';
-  try { if (typeof obsidian.getLanguage === 'function') lang = obsidian.getLanguage() || 'en'; } catch { lang = 'en'; }
-  return String(lang).toLowerCase().startsWith('es') ? 'es' : 'en';
+  try { lang = getLanguage() || 'en'; } catch { lang = 'en'; }
+  return lang.toLowerCase().startsWith('es') ? 'es' : 'en';
 };
-const T = STRINGS[detectLang()];
+const T: Strings = detectLang() === 'es' ? ES : EN;
 
 const ROOT_LAYER = '/';
-const layerOf = (path) => { const i = path.indexOf('/'); return i === -1 ? ROOT_LAYER : path.slice(0, i); };
-const layerName = (f) => (f === ROOT_LAYER ? T.root : f.replace(/^\d+\s*-\s*/, ''));
-const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-const smooth = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
-const PALETTES = {
+const layerOf = (path: string): string => { const i = path.indexOf('/'); return i === -1 ? ROOT_LAYER : path.slice(0, i); };
+const layerName = (f: string): string => (f === ROOT_LAYER ? T.root : f.replace(/^\d+\s*-\s*/, ''));
+const norm = (s: string): string => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const smooth = (a: number, b: number, x: number): number => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+interface Palette { name: 'colObsidian' | 'colGreen' | 'colOrange'; bg?: string; panel?: string; fg?: string; muted?: string; accent?: string; border?: string }
+const PALETTES: Record<string, Palette> = {
   obsidian: { name: 'colObsidian' },
   green:    { name: 'colGreen',   bg: '#000000', panel: '#030d05', fg: '#00ff41', muted: '#0b8a2a', accent: '#c8ffd4', border: '#0b5a1e' },
   orange:   { name: 'colOrange', bg: '#0a0600', panel: '#140c02', fg: '#ffb000', muted: '#8a5a00', accent: '#fff2c4', border: '#5a3a00' },
 };
 const RAIN_CHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノ0123456789ABCDEF<>/{}[]=+*';
 
-const toRgb = (color) => {
-  const c = document.createElement('canvas').getContext('2d');
+const toRgb = (color: string): RGB => {
+  const c = createEl('canvas').getContext('2d');
+  if (!c) return [128, 128, 128];
   c.fillStyle = '#808080'; c.fillStyle = color;
   const v = String(c.fillStyle);
   if (v.startsWith('#')) { const n = parseInt(v.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
-  const m = v.match(/rgba?\(([^)]+)\)/);
-  return m ? m[1].split(',').slice(0, 3).map((x) => parseFloat(x)) : [128, 128, 128];
+  const m = /rgba?\(([^)]+)\)/.exec(v);
+  if (!m) return [128, 128, 128];
+  const parts = m[1].split(',').map((x) => parseFloat(x));
+  return [parts[0] ?? 128, parts[1] ?? 128, parts[2] ?? 128];
 };
-const rgba = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+const rgba = (rgb: RGB, a: number | string): string => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
 
 class NeuralGraphView extends ItemView {
-  constructor(leaf, plugin) {
+  plugin: NeuralGraph3DPlugin;
+  nodes: GNode[]; links: GLink[]; layers: string[];
+  cam: Cam; home: Cam; goal: Goal | null;
+  selected: GNode | null; hover: GNode | null; active: GNode | null; root: GNode | null = null;
+  autoRotate: boolean; dragging: boolean; lastT: number; lastDt = 16; raf: number | null;
+  pulses: Pulse[]; rain: Drop[];
+  revealed: Set<GNode>; expanded: Set<GNode>; parentOf: Map<GNode, GNode>; history: HistoryEntry[];
+  byPath: Map<string, GNode> = new Map();
+  treeRows: GNode[] = [];
+  built = false; curMode = 'full'; curView = 'layers';
+  W = 800; H = 600; dpr = 1;
+  C: Colors | null = null;
+  scanPattern: CanvasPattern | null = null;
+  resizeObs: ResizeObserver | null = null;
+  canvas!: HTMLCanvasElement; ctx!: CanvasRenderingContext2D;
+  search!: HTMLInputElement; modeSel!: HTMLSelectElement; viewSel!: HTMLSelectElement;
+  palSel!: HTMLSelectElement; bgSel!: HTMLSelectElement;
+  backBtn!: HTMLButtonElement; restartBtn!: HTMLButtonElement;
+  legend!: HTMLDivElement; stats!: HTMLDivElement; hint!: HTMLDivElement; panel!: HTMLDivElement;
+  pName!: HTMLHeadingElement; pFolder!: HTMLDivElement; pSummary!: HTMLParagraphElement; pMeta!: HTMLDivElement;
+  pOpen!: HTMLButtonElement; pNbs!: HTMLDivElement;
+
+  constructor(leaf: WorkspaceLeaf, plugin: NeuralGraph3DPlugin) {
     super(leaf);
     this.plugin = plugin;
     this.nodes = []; this.links = []; this.layers = [];
@@ -128,19 +187,21 @@ class NeuralGraphView extends ItemView {
     this.parentOf = new Map();   // nodo -> quién lo desplegó
     this.history = [];           // [{node, added:[...]}] para "Atrás"
   }
-  get S() { return this.plugin.settings; }
-  get interactive() { return this.S.mode === 'explore' || this.S.mode === 'tree'; }
-  get isTree() { return this.S.mode === 'tree'; }
-  getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return T.title; }
-  getIcon() { return 'binary'; }
+  get S(): Settings { return this.plugin.prefs; }
+  get interactive(): boolean { return this.S.mode === 'explore' || this.S.mode === 'tree'; }
+  get isTree(): boolean { return this.S.mode === 'tree'; }
+  getViewType(): string { return VIEW_TYPE; }
+  getDisplayText(): string { return T.title; }
+  getIcon(): string { return 'binary'; }
 
-  async onOpen() {
+  async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
     root.addClass('nx4-root');
     this.canvas = root.createEl('canvas', { cls: 'nx4-canvas' });
-    this.ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return;
+    this.ctx = ctx;
 
     const tools = root.createDiv({ cls: 'nx4-tools' });
     this.search = tools.createEl('input', { type: 'search', placeholder: T.search, cls: 'nx4-input' });
@@ -157,8 +218,8 @@ class NeuralGraphView extends ItemView {
     this.bgSel.createEl('option', { value: 'none', text: T.bgNone });
     this.bgSel.createEl('option', { value: 'matrix', text: T.bgMatrix });
     this.palSel.value = this.S.palette; this.bgSel.value = this.S.background;
-    this.palSel.onchange = async () => { this.S.palette = this.palSel.value; await this.plugin.saveData(this.S); this.readColors(); };
-    this.bgSel.onchange = async () => { this.S.background = this.bgSel.value; await this.plugin.saveData(this.S); };
+    this.palSel.onchange = () => { this.S.palette = this.palSel.value; void this.plugin.saveData(this.S); this.readColors(); };
+    this.bgSel.onchange = () => { this.S.background = this.bgSel.value; void this.plugin.saveData(this.S); };
     this.backBtn = tools.createEl('button', { text: T.back, cls: 'nx4-btn' });
     this.restartBtn = tools.createEl('button', { text: T.restart, cls: 'nx4-btn' });
     const resetBtn = tools.createEl('button', { text: T.center, cls: 'nx4-btn' });
@@ -178,12 +239,12 @@ class NeuralGraphView extends ItemView {
     this.pNbs = this.panel.createDiv({ cls: 'nx4-nbs' });
 
     close.onclick = () => this.select(null);
-    this.pOpen.onclick = () => this.selected && this.openNote(this.selected);
+    this.pOpen.onclick = () => { if (this.selected) this.openNote(this.selected); };
     resetBtn.onclick = () => this.recenter();
     this.restartBtn.onclick = () => this.startExplore();
     this.backBtn.onclick = () => this.back();
-    this.viewSel.onchange = async () => { this.S.view = this.viewSel.value; this.curView = this.S.view; await this.plugin.saveData(this.S); this.applyLayout(true); };
-    this.modeSel.onchange = async () => { await this.setMode(this.modeSel.value); };
+    this.viewSel.onchange = () => { this.S.view = this.viewSel.value; this.curView = this.S.view; void this.plugin.saveData(this.S); this.applyLayout(true); };
+    this.modeSel.onchange = () => { void this.setMode(this.modeSel.value); };
     const go = () => {
       const q = norm(this.search.value.trim());
       if (!q) return;
@@ -211,28 +272,30 @@ class NeuralGraphView extends ItemView {
     this.registerEvent(this.app.vault.on('delete', refresh));
     this.registerEvent(this.app.workspace.on('css-change', () => this.readColors()));
     this.registerEvent(this.app.workspace.on('file-open', (f) => this.onFileOpen(f)));
+    this.register(() => { if (this.raf !== null) window.cancelAnimationFrame(this.raf); });
 
     this.readColors();
     this.resize();
     this.rebuild();
     this.onFileOpen(this.app.workspace.getActiveFile());
-    const loop = (t) => { this.frame(t); this.raf = window.requestAnimationFrame(loop); };
+    const loop = (t: number) => { this.frame(t); this.raf = window.requestAnimationFrame(loop); };
     this.raf = window.requestAnimationFrame(loop);
   }
 
-  async onClose() {
-    if (this.raf) window.cancelAnimationFrame(this.raf);
+  async onClose(): Promise<void> {
+    if (this.raf !== null) window.cancelAnimationFrame(this.raf);
     if (this.resizeObs) this.resizeObs.disconnect();
+    await Promise.resolve();
   }
 
   // ---------- colores ----------
-  readColors() {
+  readColors(): void {
     const cs = getComputedStyle(document.body);
-    const v = (n, fb) => cs.getPropertyValue(n).trim() || fb;
-    const pal = PALETTES[this.S.palette] && this.S.palette !== 'obsidian' ? PALETTES[this.S.palette] : null;
+    const v = (n: string, fb: string): string => cs.getPropertyValue(n).trim() || fb;
+    const pal = this.S.palette !== 'obsidian' ? PALETTES[this.S.palette] : undefined;
     const mono = v('--font-monospace', 'monospace');
-    const C = pal
-      ? { bg: pal.bg, fg: pal.fg, muted: pal.muted, accent: pal.accent, font: mono, mono }
+    const base = pal && pal.bg
+      ? { bg: pal.bg, fg: pal.fg ?? '#ffffff', muted: pal.muted ?? '#888888', accent: pal.accent ?? '#ffffff', font: mono, mono }
       : { bg: v('--background-primary', '#1e1e1e'), fg: v('--text-normal', '#dadada'),
           muted: v('--text-muted', '#999999'), accent: v('--interactive-accent', '#7c5cff'),
           font: v('--font-interface', 'sans-serif'), mono };
@@ -241,30 +304,32 @@ class NeuralGraphView extends ItemView {
     this.contentEl.toggleClass('nx4-pal-orange', this.S.palette === 'orange');
     if (this.palSel) this.palSel.value = this.S.palette;
     if (this.bgSel) this.bgSel.value = this.S.background;
-    for (const k of ['bg', 'fg', 'muted', 'accent']) C[k + 'Rgb'] = toRgb(C[k]);
-    const b = C.bgRgb;
-    C.dark = (b[0] * 299 + b[1] * 587 + b[2] * 114) / 1000 < 128;
-    this.C = C;
+    const bgRgb = toRgb(base.bg);
+    this.C = {
+      ...base, bgRgb, fgRgb: toRgb(base.fg), mutedRgb: toRgb(base.muted), accentRgb: toRgb(base.accent),
+      dark: (bgRgb[0] * 299 + bgRgb[1] * 587 + bgRgb[2] * 114) / 1000 < 128,
+    };
     this.scanPattern = null;
   }
 
   // ---------- datos ----------
-  rebuild() {
+  rebuild(): void {
     const files = this.app.vault.getMarkdownFiles();
     const prevSel = this.selected && this.selected.path;
     const old = new Map(this.nodes.map((n) => [n.path, n]));
-    const byPath = new Map();
-    this.nodes = files.map((f) => {
+    const byPath = new Map<string, GNode>();
+    this.nodes = files.map((f): GNode => {
       const o = old.get(f.path);
-      const n = { id: f.basename, path: f.path, file: f, folder: layerOf(f.path), deg: 0, nb: [],
-        x: o ? o.x : 0, y: o ? o.y : 0, z: o ? o.z : 0, appear: o ? o.appear : 1, vanish: false };
+      const n: GNode = { id: f.basename, path: f.path, file: f, folder: layerOf(f.path), deg: 0, nb: [],
+        x: o ? o.x : 0, y: o ? o.y : 0, z: o ? o.z : 0, tx: 0, ty: 0, tz: 0,
+        appear: o ? o.appear : 1, vanish: false, p: o ? o.p : { x: -9999, y: -9999, s: 0, depth: 0 }, hitR: 10, hitW: 0, depthT: 0 };
       byPath.set(f.path, n);
       return n;
     });
     this.byPath = byPath;
-    const seen = new Set();
+    const seen = new Set<string>();
     this.links = [];
-    const resolved = this.app.metadataCache.resolvedLinks || {};
+    const resolved = this.app.metadataCache.resolvedLinks;
     for (const src of Object.keys(resolved)) for (const dst of Object.keys(resolved[src])) {
       const a = byPath.get(src), b = byPath.get(dst);
       if (!a || !b || a === b) continue;
@@ -279,16 +344,23 @@ class NeuralGraphView extends ItemView {
       return a.localeCompare(b, undefined, { numeric: true });
     });
     this.root = this.nodes.find((n) => ['indice', 'index'].includes(norm(n.id)))
-      || this.nodes.slice().sort((a, b) => b.deg - a.deg)[0] || null;
+      ?? this.nodes.slice().sort((a, b) => b.deg - a.deg)[0] ?? null;
 
     // mapear el estado de exploración a los nodos nuevos
-    const mapN = (n) => byPath.get(n.path);
-    this.revealed = new Set([...this.revealed].map(mapN).filter(Boolean));
-    this.expanded = new Set([...this.expanded].map(mapN).filter(Boolean));
-    const po = new Map();
+    const mapN = (n: GNode): GNode | undefined => byPath.get(n.path);
+    const mapAll = (arr: Iterable<GNode>): GNode[] => {
+      const out: GNode[] = [];
+      for (const n of arr) { const m = mapN(n); if (m) out.push(m); }
+      return out;
+    };
+    this.revealed = new Set(mapAll(this.revealed));
+    this.expanded = new Set(mapAll(this.expanded));
+    const po = new Map<GNode, GNode>();
     for (const [c, p] of this.parentOf) { const cc = mapN(c), pp = mapN(p); if (cc && pp) po.set(cc, pp); }
     this.parentOf = po;
-    this.history = this.history.map((h) => ({ node: mapN(h.node), added: h.added.map(mapN).filter(Boolean) })).filter((h) => h.node);
+    const hist: HistoryEntry[] = [];
+    for (const h of this.history) { const node = mapN(h.node); if (node) hist.push({ node, added: mapAll(h.added) }); }
+    this.history = hist;
 
     if (!this.built) {
       this.built = true;
@@ -304,18 +376,18 @@ class NeuralGraphView extends ItemView {
       this.relayout(false);
     }
 
-    this.selected = prevSel ? byPath.get(prevSel) || null : null;
+    this.selected = prevSel ? byPath.get(prevSel) ?? null : null;
     if (!this.selected) this.panel.removeClass('open');
-    if (this.active) this.active = byPath.get(this.active.path) || null;
+    if (this.active) this.active = byPath.get(this.active.path) ?? null;
     this.pulses = [];
     this.renderLegend();
     this.syncControls();
   }
 
   // ---------- disposiciones ----------
-  relayout(fly) { if (this.isTree) this.layoutTree(); else this.applyLayout(fly); }
+  relayout(fly: boolean): void { if (this.isTree) this.layoutTree(); else this.applyLayout(fly); }
 
-  applyLayout(fly) {
+  applyLayout(fly: boolean): void {
     let maxR = 0;
     if (this.S.view === 'core') {
       const ns = this.nodes.slice().sort((a, b) => b.deg - a.deg);
@@ -344,16 +416,16 @@ class NeuralGraphView extends ItemView {
   }
 
   // Árbol plano tipo explorador de archivos: una fila por nota, sangría por nivel
-  childrenOf(n, includeVanishing) {
-    const out = [];
+  childrenOf(n: GNode, includeVanishing = false): GNode[] {
+    const out: GNode[] = [];
     for (const [c, p] of this.parentOf) if (p === n && this.revealed.has(c) && (includeVanishing || !c.vanish)) out.push(c);
     return out.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
   }
 
-  layoutTree() {
+  layoutTree(): void {
     let row = 0;
     this.treeRows = [];
-    const walk = (n, depth) => {
+    const walk = (n: GNode, depth: number): void => {
       n.depthT = depth;
       n.tx = depth * INDENT; n.ty = row * ROW; n.tz = 0;
       this.treeRows.push(n);
@@ -365,23 +437,23 @@ class NeuralGraphView extends ItemView {
     for (const n of this.nodes) if (!this.revealed.has(n)) { const r = this.root || n; n.tx = r.tx || 0; n.ty = r.ty || 0; n.tz = 0; }
   }
 
-  treeScale() { return (Math.min(this.W, this.H * 1.6) * 1.05) / this.cam.dist; }
+  treeScale(): number { return (Math.min(this.W, this.H * 1.6) * 1.05) / this.cam.dist; }
 
-  treeHome() {
+  treeHome(): Cam {
     const dist = 1000;
     const f = (Math.min(this.W, this.H * 1.6) * 1.05) / dist;
     const rx = this.root ? this.root.tx : 0, ry = this.root ? this.root.ty : 0;
     return { yaw: 0, pitch: 0, dist, tz: 0, tx: rx - (90 - this.W / 2) / f, ty: ry - (90 - this.H / 2) / f };
   }
 
-  recenter() {
+  recenter(): void {
     this.select(null);
     if (this.isTree) this.goal = this.treeHome();
     else { this.goal = Object.assign({}, this.home); this.autoRotate = true; }
   }
 
   // ---------- modos ----------
-  async setMode(mode) {
+  async setMode(mode: string): Promise<void> {
     const prev = this.curMode || 'full';
     this.curMode = mode;
     this.S.mode = mode;
@@ -400,7 +472,7 @@ class NeuralGraphView extends ItemView {
     this.syncControls();
   }
 
-  startExplore(instant) {
+  startExplore(instant = false): void {
     this.revealed = new Set(this.root ? [this.root] : []);
     this.expanded = new Set();
     this.parentOf = new Map();
@@ -419,9 +491,9 @@ class NeuralGraphView extends ItemView {
     this.syncControls();
   }
 
-  hiddenCount(n) { let k = 0; for (const m of n.nb) if (!this.revealed.has(m) || m.vanish) k++; return k; }
+  hiddenCount(n: GNode): number { let k = 0; for (const m of n.nb) if (!this.revealed.has(m) || m.vanish) k++; return k; }
 
-  reveal(m, parent) {
+  reveal(m: GNode, parent: GNode): boolean {
     if (this.revealed.has(m) && !m.vanish) return false;
     if (!this.revealed.has(m)) { m.x = parent.x; m.y = parent.y; m.z = parent.z; m.appear = 0; }
     m.vanish = false;
@@ -430,8 +502,8 @@ class NeuralGraphView extends ItemView {
     return true;
   }
 
-  expand(n) {
-    const added = [];
+  expand(n: GNode): void {
+    const added: GNode[] = [];
     for (const m of n.nb.slice().sort((a, b) => a.id.localeCompare(b.id))) if (this.reveal(m, n)) added.push(m);
     this.expanded.add(n);
     if (added.length) this.history.push({ node: n, added });
@@ -440,13 +512,13 @@ class NeuralGraphView extends ItemView {
   }
 
   // Oculta a m y a todo lo que se desplegó desde m (se encoge hacia su padre)
-  hideSubtree(m) {
+  hideSubtree(m: GNode): void {
     for (const c of this.childrenOf(m, true)) if (!c.vanish) this.hideSubtree(c);
     this.expanded.delete(m);
     m.vanish = true;
   }
 
-  collapse(n) {
+  collapse(n: GNode): void {
     for (const c of this.childrenOf(n)) this.hideSubtree(c);
     this.expanded.delete(n);
     this.history = this.history.filter((h) => h.node !== n && !h.node.vanish);
@@ -454,7 +526,7 @@ class NeuralGraphView extends ItemView {
     this.syncControls();
   }
 
-  back() {
+  back(): void {
     if (!this.interactive) return;
     let h = this.history.pop();
     while (h && (h.node.vanish || !this.revealed.has(h.node))) h = this.history.pop();
@@ -468,37 +540,37 @@ class NeuralGraphView extends ItemView {
     this.syncControls();
   }
 
-  revealPathTo(target) {
+  revealPathTo(target: GNode): void {
     if (!this.root) return;
     if (this.revealed.has(target) && !target.vanish) { this.relayout(false); return; }
-    const prev = new Map([[this.root, null]]);
-    const q = [this.root];
+    const prev = new Map<GNode, GNode | null>([[this.root, null]]);
+    const q: GNode[] = [this.root];
     while (q.length) {
       const cur = q.shift();
-      if (cur === target) break;
+      if (!cur || cur === target) break;
       for (const m of cur.nb) if (!prev.has(m)) { prev.set(m, cur); q.push(m); }
     }
-    const chain = [];
-    for (let c = prev.has(target) ? target : null; c; c = prev.get(c)) chain.unshift(c);
+    const chain: GNode[] = [];
+    for (let c: GNode | null | undefined = prev.has(target) ? target : null; c; c = prev.get(c)) chain.unshift(c);
     if (!chain.length) chain.push(this.root, target);
     if (!this.revealed.has(this.root)) this.reveal(this.root, this.root);
-    const added = [];
+    const added: GNode[] = [];
     for (let i = 1; i < chain.length; i++) if (this.reveal(chain[i], chain[i - 1])) added.push(chain[i]);
     if (added.length) this.history.push({ node: chain[0], added });
     this.relayout(false);
     this.syncControls();
   }
 
-  ensureVisible(n) {
+  ensureVisible(n: GNode): void {
     const f = this.treeScale();
     const sx = this.W / 2 + (n.tx - this.cam.tx) * f, sy = this.H / 2 + (n.ty - this.cam.ty) * f;
-    const g = Object.assign({}, this.goal || this.cam, { yaw: 0, pitch: 0 });
+    const g: Goal = { ...(this.goal ?? this.cam), yaw: 0, pitch: 0 };
     if (sy < 80 || sy > this.H - 160) g.ty = n.ty - (this.H * 0.35 - this.H / 2) / f;
     if (sx < 40 || sx > this.W - 260) g.tx = n.tx - (120 - this.W / 2) / f;
     this.goal = g;
   }
 
-  syncControls() {
+  syncControls(): void {
     const m = this.S.mode;
     if (this.modeSel) this.modeSel.value = m;
     if (this.viewSel) this.viewSel.toggleClass('nx4-hidden', m === 'tree');
@@ -518,29 +590,29 @@ class NeuralGraphView extends ItemView {
     }
   }
 
-  renderLegend() {
+  renderLegend(): void {
     this.legend.empty();
     const hidden = new Set(this.S.hiddenLayers);
     this.layers.forEach((f) => {
       const b = this.legend.createEl('button', { cls: 'nx4-chip', text: layerName(f) });
       b.toggleClass('off', hidden.has(f));
-      b.onclick = async () => {
+      b.onclick = () => {
         const h = new Set(this.S.hiddenLayers);
-        h.has(f) ? h.delete(f) : h.add(f);
+        if (h.has(f)) h.delete(f); else h.add(f);
         this.S.hiddenLayers = [...h];
         b.toggleClass('off', h.has(f));
-        await this.plugin.saveData(this.S);
+        void this.plugin.saveData(this.S);
       };
     });
   }
 
-  visible(n) {
+  visible(n: GNode): boolean {
     if (!this.revealed.has(n)) return false;
     if (this.isTree) return true;
     return !this.S.hiddenLayers.includes(n.folder);
   }
 
-  onFileOpen(file) {
+  onFileOpen(file: TFile | null): void {
     if (!file || !this.byPath) return;
     const n = this.byPath.get(file.path);
     if (!n) return;
@@ -550,10 +622,10 @@ class NeuralGraphView extends ItemView {
     }
   }
 
-  openNote(n) { this.app.workspace.getLeaf('tab').openFile(n.file); }
+  openNote(n: GNode): void { void this.app.workspace.getLeaf('tab').openFile(n.file); }
 
   // ---------- render ----------
-  resize() {
+  resize(): void {
     const r = this.contentEl.getBoundingClientRect();
     this.W = Math.max(200, r.width); this.H = Math.max(200, r.height);
     this.dpr = window.devicePixelRatio || 1;
@@ -564,7 +636,7 @@ class NeuralGraphView extends ItemView {
     this.scanPattern = null;
   }
 
-  project(x, y, z) {
+  project(x: number, y: number, z: number): Proj {
     const c = this.cam;
     x -= c.tx; y -= c.ty; z -= c.tz;
     const cy = Math.cos(c.yaw), sy = Math.sin(c.yaw);
@@ -576,13 +648,14 @@ class NeuralGraphView extends ItemView {
     return { x: this.W / 2 + x1 * f, y: this.H / 2 + y1 * f, s: f, depth };
   }
 
-  frame(t) {
+  frame(t: number): void {
     const dt = Math.min(50, t - (this.lastT || t));
     this.lastT = t; this.lastDt = dt;
     const c = this.cam, g = this.goal;
     if (g) {
-      for (const k of ['tx', 'ty', 'tz', 'dist', 'pitch', 'yaw']) if (k in g) c[k] += (g[k] - c[k]) * 0.045;
-      if (Math.abs(g.dist - c.dist) < 0.5 && Math.abs(g.tx - c.tx) < 0.3 && Math.abs(g.ty - c.ty) < 0.3) this.goal = null;
+      const keys: (keyof Cam)[] = ['tx', 'ty', 'tz', 'dist', 'pitch', 'yaw'];
+      for (const k of keys) { const gv = g[k]; if (gv !== undefined) c[k] += (gv - c[k]) * 0.045; }
+      if (Math.abs((g.dist ?? c.dist) - c.dist) < 0.5 && Math.abs((g.tx ?? c.tx) - c.tx) < 0.3 && Math.abs((g.ty ?? c.ty) - c.ty) < 0.3) this.goal = null;
     }
     let finished = false;
     for (const n of this.nodes) {
@@ -604,8 +677,9 @@ class NeuralGraphView extends ItemView {
     if (this.C && this.W) this.draw(t, dt);
   }
 
-  drawRain(dt) {
+  drawRain(dt: number): void {
     const ctx = this.ctx, C = this.C;
+    if (!C) return;
     ctx.font = `14px ${C.mono}`;
     ctx.textAlign = 'center';
     for (const d of this.rain) {
@@ -622,22 +696,24 @@ class NeuralGraphView extends ItemView {
     }
   }
 
-  drawScanlines() {
+  drawScanlines(): void {
     const ctx = this.ctx;
     if (!this.scanPattern) {
-      const p = document.createElement('canvas'); p.width = 4; p.height = 3;
-      const pc = p.getContext('2d'); pc.fillStyle = 'rgba(0,0,0,0.28)'; pc.fillRect(0, 0, 4, 1);
+      const p = createEl('canvas'); p.width = 4; p.height = 3;
+      const pc = p.getContext('2d');
+      if (!pc) return;
+      pc.fillStyle = 'rgba(0,0,0,0.28)'; pc.fillRect(0, 0, 4, 1);
       this.scanPattern = ctx.createPattern(p, 'repeat');
     }
-    ctx.fillStyle = this.scanPattern;
-    ctx.fillRect(0, 0, this.W, this.H);
+    if (this.scanPattern) { ctx.fillStyle = this.scanPattern; ctx.fillRect(0, 0, this.W, this.H); }
     const g = ctx.createRadialGradient(this.W / 2, this.H / 2, Math.min(this.W, this.H) * 0.3, this.W / 2, this.H / 2, Math.max(this.W, this.H) * 0.75);
     g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.55)');
     ctx.fillStyle = g; ctx.fillRect(0, 0, this.W, this.H);
   }
 
-  draw(t, dt) {
+  draw(t: number, dt: number): void {
     const ctx = this.ctx, C = this.C, S = this.S, W = this.W, H = this.H;
+    if (!C) return;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (S.background === 'matrix' && C.dark) this.drawRain(dt);
@@ -648,8 +724,9 @@ class NeuralGraphView extends ItemView {
   }
 
   // ----- árbol plano -----
-  drawTree(t) {
+  drawTree(t: number): void {
     const ctx = this.ctx, C = this.C, S = this.S;
+    if (!C) return;
     const vis = this.nodes.filter((n) => this.revealed.has(n));
     for (const n of vis) n.p = this.project(n.x, n.y, 0);
     const glow = S.glow && C.dark;
@@ -682,7 +759,7 @@ class NeuralGraphView extends ItemView {
         if (!q.child) { this.pulses.splice(i, 1); continue; }
         q.k += (this.lastDt || 16) / dur;
         const p = this.parentOf.get(q.child);
-        if (q.k >= 1 || !p || !q.child.p || !p.p) { this.pulses.splice(i, 1); continue; }
+        if (q.k >= 1 || !p) { this.pulses.splice(i, 1); continue; }
         const corner = this.project(p.x, q.child.y, 0);
         const l1 = Math.abs(corner.y - p.p.y), l2 = Math.abs(q.child.p.x - corner.x), L = l1 + l2 || 1;
         const d = q.k * L;
@@ -726,7 +803,7 @@ class NeuralGraphView extends ItemView {
       ctx.font = `${isFocus ? '600 ' : ''}${fontSize}px ${C.font}`;
       ctx.fillStyle = isFocus || n === this.active ? C.fg : rgba(C.fgRgb, 0.85);
       ctx.fillText(n.id, x, n.p.y);
-      const w = ctx.measureText ? ctx.measureText(n.id).width : n.id.length * 7;
+      const w = ctx.measureText(n.id).width;
       if (hidden && !open) {
         ctx.font = `${Math.max(9, fontSize - 3)}px ${C.mono}`;
         ctx.fillStyle = rgba(C.accentRgb, 0.85);
@@ -739,18 +816,19 @@ class NeuralGraphView extends ItemView {
   }
 
   // ----- grafo 3D -----
-  drawGraph(t, dt) {
+  drawGraph(t: number, dt: number): void {
     const ctx = this.ctx, C = this.C, S = this.S;
+    if (!C) return;
     const vis = this.nodes.filter((n) => this.visible(n));
     for (const n of vis) n.p = this.project(n.x, n.y, n.z);
     const focus = this.hover || this.selected;
     const near = focus ? new Set([focus, ...focus.nb]) : null;
     let dMin = Infinity, dMax = -Infinity;
     for (const n of vis) { dMin = Math.min(dMin, n.p.depth); dMax = Math.max(dMax, n.p.depth); }
-    const fog = (d) => 1 - 0.6 * ((d - dMin) / Math.max(1, dMax - dMin));
+    const fog = (d: number): number => 1 - 0.6 * ((d - dMin) / Math.max(1, dMax - dMin));
     const glow = S.glow && C.dark && vis.length < 600;
     const explore = S.mode === 'explore';
-    const linkVisible = (l) => this.visible(l.s) && this.visible(l.t);
+    const linkVisible = (l: GLink): boolean => this.visible(l.s) && this.visible(l.t);
 
     ctx.lineCap = 'round';
     for (const l of this.links) {
@@ -853,11 +931,11 @@ class NeuralGraphView extends ItemView {
   }
 
   // ---------- interacción ----------
-  pick(mx, my) {
-    let best = null, bd = Infinity;
+  pick(mx: number, my: number): GNode | null {
+    let best: GNode | null = null, bd = Infinity;
     for (const n of this.nodes) {
-      if (!n.p || !this.visible(n) || n.vanish) continue;
-      let hit;
+      if (!this.visible(n) || n.vanish) continue;
+      let hit: boolean;
       if (this.isTree && n.hitW) hit = mx >= n.p.x - n.hitR && mx <= n.p.x + n.hitW && Math.abs(my - n.p.y) <= Math.max(n.hitR, 10);
       else hit = Math.hypot(n.p.x - mx, n.p.y - my) < (n.hitR || 10);
       if (hit && n.p.depth < bd) { best = n; bd = n.p.depth; }
@@ -865,7 +943,7 @@ class NeuralGraphView extends ItemView {
     return best;
   }
 
-  clickNode(n) {
+  clickNode(n: GNode | null): void {
     if (!n) { this.select(null); return; }
     if (this.interactive) {
       const open = this.expanded.has(n) && this.childrenOf(n).some((c) => !c.vanish);
@@ -876,7 +954,7 @@ class NeuralGraphView extends ItemView {
     if (this.S.openOnClick) this.openNote(n);
   }
 
-  bindPointer() {
+  bindPointer(): void {
     const cv = this.canvas;
     let moved = 0, lx = 0, ly = 0;
     cv.addEventListener('pointerdown', (e) => {
@@ -918,7 +996,7 @@ class NeuralGraphView extends ItemView {
     cv.addEventListener('dblclick', () => { if (this.selected) this.openNote(this.selected); });
   }
 
-  async select(n) {
+  select(n: GNode | null): void {
     this.selected = n;
     if (!n) { this.panel.removeClass('open'); return; }
     if (this.isTree) this.ensureVisible(n);
@@ -934,13 +1012,17 @@ class NeuralGraphView extends ItemView {
     });
     this.panel.addClass('open');
     this.pSummary.setText('');
+    void this.loadSummary(n);
+  }
+
+  async loadSummary(n: GNode): Promise<void> {
     try {
       const text = await this.app.vault.cachedRead(n.file);
       if (this.selected !== n) return;
       const body = text.replace(/^---[\s\S]*?---\s*/, '');
       const words = body.split(/\s+/).filter(Boolean).length;
       const line = body.split('\n').map((s) => s.trim()).find((s) => s && !s.startsWith('#') && !s.startsWith('---') && !s.startsWith('>')) || '';
-      const clean = line.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (m, a, b) => b || a);
+      const clean = line.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (_m: string, a: string, b?: string) => b ?? a);
       this.pSummary.setText(clean.length > 180 ? clean.slice(0, 179) + '…' : clean || T.noSummary);
       this.pMeta.setText(T.words(words.toLocaleString(), n.deg));
     } catch { /* no summary */ }
@@ -948,11 +1030,12 @@ class NeuralGraphView extends ItemView {
 }
 
 class NeuralSettingTab extends PluginSettingTab {
-  constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
-  display() {
+  plugin: NeuralGraph3DPlugin;
+  constructor(app: App, plugin: NeuralGraph3DPlugin) { super(app, plugin); this.plugin = plugin; }
+  display(): void {
     const { containerEl } = this;
-    const S = this.plugin.settings;
-    const save = () => this.plugin.saveSettings();
+    const S = this.plugin.prefs;
+    const save = (): Promise<void> => this.plugin.saveSettings();
     containerEl.empty();
 
     new Setting(containerEl).setName(T.sMode)
@@ -962,7 +1045,7 @@ class NeuralSettingTab extends PluginSettingTab {
       .addDropdown((d) => d.addOption('layers', T.sLayers).addOption('core', T.sCore)
         .setValue(S.view).onChange(async (v) => { S.view = v; await save(); }));
 
-    const toggle = (key, name, desc) => new Setting(containerEl).setName(name).setDesc(desc)
+    const toggle = (key: BoolKey, name: string, desc: string): Setting => new Setting(containerEl).setName(name).setDesc(desc)
       .addToggle((t) => t.setValue(S[key]).onChange(async (v) => { S[key] = v; await save(); }));
 
     new Setting(containerEl).setName(T.hAppearance).setHeading();
@@ -978,15 +1061,15 @@ class NeuralSettingTab extends PluginSettingTab {
     toggle('glow', T.glow, T.glowDesc);
     toggle('pulses', T.pulses, T.pulsesDesc);
     new Setting(containerEl).setName(T.pulseSpeed)
-      .addSlider((s) => s.setLimits(1, 10, 1).setValue(S.pulseSpeed).setDynamicTooltip().onChange(async (v) => { S.pulseSpeed = v; await save(); }));
+      .addSlider((s) => s.setLimits(1, 10, 1).setValue(S.pulseSpeed).onChange(async (v) => { S.pulseSpeed = v; await save(); }));
     new Setting(containerEl).setName(T.rotSpeed).setDesc(T.rotDesc)
-      .addSlider((s) => s.setLimits(0, 10, 1).setValue(S.rotateSpeed).setDynamicTooltip().onChange(async (v) => { S.rotateSpeed = v; await save(); }));
+      .addSlider((s) => s.setLimits(0, 10, 1).setValue(S.rotateSpeed).onChange(async (v) => { S.rotateSpeed = v; await save(); }));
 
     new Setting(containerEl).setName(T.hBehavior).setHeading();
     toggle('openOnClick', T.openClick, T.openClickDesc);
     toggle('followActive', T.follow, T.followDesc);
     new Setting(containerEl).setName(T.nodeSize)
-      .addSlider((s) => s.setLimits(0.5, 2, 0.1).setValue(S.nodeScale).setDynamicTooltip().onChange(async (v) => { S.nodeScale = v; await save(); }));
+      .addSlider((s) => s.setLimits(0.5, 2, 0.1).setValue(S.nodeScale).onChange(async (v) => { S.nodeScale = v; await save(); }));
     new Setting(containerEl).setName(T.labels)
       .addDropdown((d) => d.addOption('auto', T.lAuto).addOption('all', T.lAll).addOption('none', T.lNone)
         .setValue(S.labels).onChange(async (v) => { S.labels = v; await save(); }));
@@ -996,37 +1079,45 @@ class NeuralSettingTab extends PluginSettingTab {
 }
 
 export default class NeuralGraph3DPlugin extends Plugin {
-  async onload() {
+  prefs: Settings = { ...DEFAULTS, hiddenLayers: [] };
+
+  async onload(): Promise<void> {
     await this.loadSettings();
     this.registerView(VIEW_TYPE, (leaf) => new NeuralGraphView(leaf, this));
-    this.addRibbonIcon('network', T.title, () => this.activate());
-    this.addCommand({ id: 'open-view', name: T.open, callback: () => this.activate() });
+    this.addRibbonIcon('network', T.title, () => { void this.activate(); });
+    this.addCommand({ id: 'open-view', name: T.open, callback: () => { void this.activate(); } });
     this.addSettingTab(new NeuralSettingTab(this.app, this));
   }
 
-  async loadSettings() {
-    const data = (await this.loadData()) || {};
-    this.settings = Object.assign({}, DEFAULTS);
-    for (const k of Object.keys(DEFAULTS)) if (k in data && typeof data[k] === typeof DEFAULTS[k]) this.settings[k] = data[k];
+  async loadSettings(): Promise<void> {
+    const raw: unknown = await this.loadData();
+    const data = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...DEFAULTS, hiddenLayers: [] };
+    for (const k of Object.keys(DEFAULTS)) {
+      const val = data[k];
+      if (k === 'hiddenLayers') { if (Array.isArray(val)) out[k] = val.filter((x): x is string => typeof x === 'string'); }
+      else if (typeof val === typeof out[k]) out[k] = val;
+    }
+    this.prefs = out as unknown as Settings;
   }
 
-  async saveSettings() {
-    await this.saveData(this.settings);
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.prefs);
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       const v = leaf.view;
       if (!(v instanceof NeuralGraphView)) continue;
       v.readColors(); v.renderLegend();
-      if (v.curMode !== this.settings.mode) await v.setMode(this.settings.mode);
-      else if (v.curView !== this.settings.view) { v.curView = this.settings.view; if (!v.isTree) v.applyLayout(true); }
+      if (v.curMode !== this.prefs.mode) await v.setMode(this.prefs.mode);
+      else if (v.curView !== this.prefs.view) { v.curView = this.prefs.view; if (!v.isTree) v.applyLayout(true); }
       v.syncControls();
     }
   }
 
-  async activate() {
-    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
-    if (existing.length) { this.app.workspace.revealLeaf(existing[0]); return; }
+  async activate(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (existing) { await this.app.workspace.revealLeaf(existing); return; }
     const leaf = this.app.workspace.getLeaf('tab');
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 }

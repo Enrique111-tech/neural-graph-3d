@@ -49,11 +49,15 @@ All options live in **Settings → Neural Graph 3D**.
 
 The plugin works fully offline. It only reads your notes' names, links and first paragraph to draw the map. It sends nothing over the network.
 
+## Releasing
+
+Push an annotated tag that matches the version in `manifest.json` (for example `git tag -a 1.0.2 -m "Release notes"` and `git push --follow-tags`). The GitHub Actions workflow lints, builds, attests and publishes the release with `main.js`, `manifest.json` and `styles.css`.
+
 ## Development
 
 ```bash
 npm install
-npm run build   # builds main.js from src/main.js
+npm run build   # builds main.js from src/main.ts
 npm run lint
 ```
 

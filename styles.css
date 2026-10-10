@@ -12,7 +12,8 @@
   --nx-font: var(--font-monospace);
 }
 .nx4-root .nx4-hidden { display: none; }
-.nx4-root { position: relative; padding: 0 !important; overflow: hidden; background: var(--nx-bg); outline: none; font-family: var(--nx-font); }
+.view-content.nx4-root { padding: 0; }
+.nx4-root { position: relative; overflow: hidden; background: var(--nx-bg); outline: none; font-family: var(--nx-font); }
 .nx4-canvas { display: block; width: var(--nx4-w); height: var(--nx4-h); cursor: grab; touch-action: none; }
 .nx4-canvas.dragging { cursor: grabbing; }
 .nx4-canvas.pointing { cursor: crosshair; }
