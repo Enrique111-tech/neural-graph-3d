@@ -1,6 +1,6 @@
 {
   "name": "neural-graph-3d",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "3D neural-network style map of your vault, with layered, core and tree views.",
   "main": "main.js",
   "type": "module",

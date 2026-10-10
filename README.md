@@ -43,7 +43,7 @@ All options live in **Settings → Neural Graph 3D**.
 
 **From Obsidian:** Settings → Community plugins → Browse → search for "Neural Graph 3D" → Install → Enable.
 
-**Manually:** download `main.js`, `manifest.json` and `styles.css` from the latest release and put them in `<your vault>/.obsidian/plugins/neural-graph-3d/`. Then enable the plugin in Settings → Community plugins.
+**Manually:** download `main.js`, `manifest.json` and `styles.css` from the latest release and put them in `<your vault>/.obsidian/plugins/neural-graph/`. Then enable the plugin in Settings → Community plugins.
 
 ## Privacy
 
