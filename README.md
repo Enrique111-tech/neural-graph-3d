@@ -4,6 +4,18 @@ Explore your vault as a 3D neural network. Every note is a neuron, every `[[link
 
 *[Leer en español](#español)*
 
+![Full map, layers view](docs/screenshots/1-full-layers.png)
+
+| | |
+|---|---|
+| ![Focus a note to see its connections](docs/screenshots/2-focus.png) | ![Core view](docs/screenshots/3-core.png) |
+| **Focus**: click a note to see its links and summary | **Core view**: all notes in one cluster |
+| ![Explore 3D](docs/screenshots/4-explore.png) | ![Tree mode](docs/screenshots/5-tree.png) |
+| **Explore 3D**: expand the map from your index note | **Tree**: file-explorer style, branch by branch |
+| ![Green terminal style with Matrix background](docs/screenshots/6-green-matrix.png) | |
+| **Green terminal style** with the optional Matrix background | |
+
+
 ## Features
 
 | Mode | What it does |
