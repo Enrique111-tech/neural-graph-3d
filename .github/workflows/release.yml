@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist, e.g. 1.0.2)"
+        required: true
 
 permissions:
   contents: write
@@ -14,8 +19,12 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve tag
+        run: echo "TAG=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -30,8 +39,8 @@ jobs:
       - name: Check that the tag matches manifest.json
         run: |
           VERSION=$(node -p "require('./manifest.json').version")
-          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
-            echo "manifest.json version ($VERSION) does not match tag ($GITHUB_REF_NAME)"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "manifest.json version ($VERSION) does not match tag ($TAG)"
             exit 1
           fi
 
@@ -47,6 +56,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
-            --title "$GITHUB_REF_NAME" \
-            --notes-from-tag
+          gh release create "$TAG" main.js manifest.json styles.css \
+            --title "$TAG" \
+            --notes-from-tag \
+            --verify-tag
